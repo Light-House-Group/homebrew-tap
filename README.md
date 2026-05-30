@@ -17,7 +17,7 @@ brew install --cask light-house-group/taps/clip-board
 Homebrew will auto-add this tap the first time you reference it. To add it explicitly:
 
 ```bash
-brew tap light-house-group/tapss
+brew tap light-house-group/taps
 ```
 
 ## Update
