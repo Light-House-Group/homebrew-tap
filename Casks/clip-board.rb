@@ -1,6 +1,6 @@
 cask "clip-board" do
-  version "1.2.0"
-  sha256 "7ba1c951fe1d522e6a09247995f3e5c9d480b13b929afb816b6e4dfd53f88335"
+  version "1.2.1"
+  sha256 "9c42d1eef5a70f66baacbfb71699a1eb969df90da0eeca72acb58602d0c94f76"
 
   url "https://github.com/Light-House-Group/Clip-Board/releases/download/v#{version}/Clip-Board.zip"
   name "Clip-Board"
