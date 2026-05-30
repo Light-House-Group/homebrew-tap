@@ -116,11 +116,10 @@ jobs:
             git add "$cask_file"
             git commit -m "${cask}: ${current} → ${latest}"
             git push -u origin "$branch"
+            body=$(printf 'Bumps **%s** to upstream release v%s. New sha256: `%s`.\n\nOpened by .github/workflows/autobump.yml on a livecheck hit.\n' "$cask" "$latest" "$new_sha")
             gh pr create \
               --title "${cask}: ${current} → ${latest}" \
-              --body "Bumps **${cask}** to upstream release v${latest}. New sha256: \`${new_sha}\`.
-
-Opened by .github/workflows/autobump.yml on a livecheck hit." \
+              --body "$body" \
               --base main \
               --head "$branch"
             git checkout main
