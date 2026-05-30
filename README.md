@@ -11,13 +11,13 @@ Homebrew tap for [Light-House-Group](https://github.com/Light-House-Group) apps.
 ## Install
 
 ```bash
-brew install --cask light-house-group/tap/clip-board
+brew install --cask light-house-group/taps/clip-board
 ```
 
 Homebrew will auto-add this tap the first time you reference it. To add it explicitly:
 
 ```bash
-brew tap light-house-group/tap
+brew tap light-house-group/tapss
 ```
 
 ## Update
