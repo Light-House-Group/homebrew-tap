@@ -1,15 +1,19 @@
 name: Auto-bump casks
 
-# Walks every cask in this tap and calls `brew bump-cask-pr` on each. brew
-# does the livecheck + sha256 recompute + PR-creation work — idempotent: if a
-# cask is already at the latest release, the call no-ops; if there's already
-# an open PR for the new version, brew refuses to create a duplicate.
+# For each cask in this tap, query the upstream repo's "latest release" via
+# the GitHub API, compare with the cask's pinned version, and (if newer) open
+# a PR bumping `version` + `sha256`. We deliberately avoid `brew livecheck` /
+# `brew bump-cask-pr` because the JSON schema drifts across brew versions and
+# `bump-cask-pr` requires `--version` for third-party tap casks even when
+# livecheck is configured.
+#
+# Idempotent: each bump uses a branch named `autobump/<cask>-<version>`; if
+# the branch already exists (PR open or merged), the run is a no-op.
 #
 # Manual trigger: Actions → Auto-bump casks → "Run workflow".
 
 on:
   schedule:
-    # Hourly. Cheap (~1 min total) and catches most releases within the hour.
     - cron: "17 * * * *"
   workflow_dispatch:
 
@@ -20,56 +24,93 @@ permissions:
 jobs:
   autobump:
     runs-on: macos-14
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
-      TAP_FULL_NAME: light-house-group/taps
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      HOMEBREW_NO_AUTO_UPDATE: "1"
-      HOMEBREW_NO_ANALYTICS: "1"
-      HOMEBREW_NO_INSTALL_FROM_API: "1"
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # Symlink the checked-out repo as a tap so `brew` resolves casks under
-      # their fully-qualified `light-house-group/taps/<cask>` name. We work
-      # against the live checkout (rather than `brew tap` from the network) so
-      # the workflow operates on the exact commit being CI'd.
-      - name: Link tap into Homebrew prefix
-        run: |
-          set -euxo pipefail
-          dest="$(brew --repo)/Library/Taps/light-house-group/homebrew-taps"
-          mkdir -p "$(dirname "$dest")"
-          rm -rf "$dest"
-          ln -s "$PWD" "$dest"
-
       - name: Configure git author
         run: |
-          git config --global user.name  "autobump-bot"
-          git config --global user.email "autobump-bot@users.noreply.github.com"
+          git config user.name  "autobump-bot"
+          git config user.email "autobump-bot@users.noreply.github.com"
 
       - name: Bump each cask
         run: |
           set -uo pipefail
-          fail=0
+          shopt -s nullglob
           for cask_file in Casks/*.rb; do
             cask="$(basename "$cask_file" .rb)"
-            full="${TAP_FULL_NAME}/${cask}"
-            echo "::group::${full}"
-            # bump-cask-pr:
-            #   --no-fork    push the bump branch to this repo, not a fork
-            #   --no-browse  don't try to open a browser
-            #   --no-audit   skip the cask audit step (the cask was already
-            #                audited when it landed)
-            # It exits non-zero ("error: A newer version of <cask> is not
-            # available.") when already at latest — that's expected; don't kill
-            # the loop. We still surface unexpected errors at the end.
-            if ! brew bump-cask-pr --no-fork --no-browse --no-audit "${full}" 2>&1; then
-              echo "(bump-cask-pr exited non-zero — likely 'already at latest' or 'PR exists'; continuing)"
+            echo "::group::${cask}"
+
+            # Extract the upstream owner/repo from the `url` line. We assume a
+            # GitHub release URL like:
+            #   url "https://github.com/OWNER/REPO/releases/download/v#{version}/asset.zip"
+            upstream="$(grep -E '^\s*url\s+"https://github\.com/' "$cask_file" \
+                       | head -1 \
+                       | sed -E 's|.*github\.com/([^/]+/[^/]+)/.*|\1|')"
+            if [[ -z "$upstream" ]]; then
+              echo "::warning::could not parse upstream repo from $cask_file"
+              echo "::endgroup::"; continue
             fi
+
+            current="$(grep -E '^\s*version\s+"' "$cask_file" | head -1 \
+                       | sed -E 's/.*version[[:space:]]+"([^"]+)".*/\1/')"
+            latest_tag="$(gh api "repos/${upstream}/releases/latest" --jq .tag_name 2>/dev/null || true)"
+            latest="${latest_tag#v}"
+
+            if [[ -z "$latest" ]]; then
+              echo "no latest release for ${upstream}"
+              echo "::endgroup::"; continue
+            fi
+            if [[ "$latest" == "$current" ]]; then
+              echo "${cask} at latest (${current})"
+              echo "::endgroup::"; continue
+            fi
+            echo "${cask}: ${current} → ${latest}"
+
+            branch="autobump/${cask}-${latest}"
+            if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+              echo "branch ${branch} already exists on origin — skipping"
+              echo "::endgroup::"; continue
+            fi
+
+            # Reconstruct the new download URL by substituting the version.
+            url_template="$(grep -E '^\s*url\s+"' "$cask_file" | head -1 \
+                            | sed -E 's|.*url[[:space:]]+"([^"]+)".*|\1|')"
+            new_url="${url_template//\#\{version\}/$latest}"
+
+            tmp="$(mktemp -d)"
+            asset="${tmp}/$(basename "$new_url")"
+            if ! curl -fsSL "$new_url" -o "$asset"; then
+              echo "::warning::failed to download ${new_url}"
+              echo "::endgroup::"; continue
+            fi
+            new_sha="$(shasum -a 256 "$asset" | awk '{print $1}')"
+
+            # In-place version + sha256 rewrite (BSD sed needs '' after -i).
+            sed -E -i '' "s|^([[:space:]]*version[[:space:]]+)\"[^\"]+\"|\1\"${latest}\"|" "$cask_file"
+            sed -E -i '' "s|^([[:space:]]*sha256[[:space:]]+)\"[a-f0-9]{64}\"|\1\"${new_sha}\"|" "$cask_file"
+
+            if git diff --quiet "$cask_file"; then
+              echo "no textual change for ${cask} — skipping"
+              echo "::endgroup::"; continue
+            fi
+
+            git checkout -B "$branch"
+            git add "$cask_file"
+            git commit -m "${cask} ${current} → ${latest}"
+            git push -u origin "$branch"
+
+            body="$(printf 'Auto-bumps **%s** to upstream release v%s.\n\nNew sha256: `%s`.\n\nOpened by .github/workflows/autobump.yml on a GitHub-API release check.\n' "$cask" "$latest" "$new_sha")"
+            gh pr create --base main --head "$branch" \
+              --title "${cask} ${current} → ${latest}" \
+              --body "$body"
+
+            git checkout main
             echo "::endgroup::"
           done
-          # Always succeed: per-cask up-to-date is the normal, non-error state.
+          # Always succeed: per-cask up-to-date is the normal state.
           exit 0
