@@ -1,6 +1,6 @@
 cask "network-monitor" do
-  version "1.4.4"
-  sha256 "bdc34bed8bb4b38f8624566f29329944962c19619bb81ce6d77d374aaac23674"
+  version "1.5.0"
+  sha256 "5f39e1c20415839a2b74c3a266e6c4480e39c17b2f3f5f465c59b824d4987c7a"
 
   url "https://github.com/Light-House-Group/Network-Speed/releases/download/v#{version}/NetworkUsageMonitor.app.zip",
       verified: "github.com/Light-House-Group/Network-Speed/"

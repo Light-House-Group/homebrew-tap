@@ -1,14 +1,25 @@
 name: Auto-bump casks
 
-# For each cask in this tap, query the upstream repo's "latest release" via
-# the GitHub API, compare with the cask's pinned version, and (if newer) open
-# a PR bumping `version` + `sha256`. We deliberately avoid `brew livecheck` /
-# `brew bump-cask-pr` because the JSON schema drifts across brew versions and
-# `bump-cask-pr` requires `--version` for third-party tap casks even when
-# livecheck is configured.
+# Keeps every cask in this tap pinned to its upstream's LATEST GitHub release —
+# fully hands-off. For each `Casks/*.rb`, query the upstream "latest release",
+# and if it's newer than the cask's pinned version, download the asset, verify
+# its sha256 against the release's published `.sha256` sidecar, rewrite
+# `version` + `sha256`, and COMMIT THE BUMP DIRECTLY to this tap's default
+# branch. No PR to merge — the maintainer never hand-edits a cask.
 #
-# Idempotent: each bump uses a branch named `autobump/<cask>-<version>`; if
-# the branch already exists (PR open or merged), the run is a no-op.
+# Why direct-commit (not a PR): this is a single-maintainer tap and each bump is
+# mechanical + cryptographically verified against the publisher's own sidecar,
+# so a human merge step adds latency without adding safety. (Homebrew-core uses
+# PRs because it has many maintainers; a personal tap does not need that.)
+#
+# Why we roll our own (not `brew bump-cask-pr` / `brew livecheck`): their JSON
+# schema drifts across brew versions and `bump-cask-pr` demands `--version` for
+# third-party casks even when livecheck is configured.
+#
+# Runs hourly; a new release becomes installable-at-latest within the hour. For
+# INSTANT updates, have the upstream release workflow fire a `repository_dispatch`
+# at this repo (needs a cross-repo PAT) — see the commented block in the
+# upstream `release.yml`. The hourly poll needs no extra secrets.
 #
 # Manual trigger: Actions → Auto-bump casks → "Run workflow".
 
@@ -18,8 +29,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write       # push the bump branch
-  pull-requests: write  # open the PR
+  contents: write       # push the bump commit directly to the default branch
 
 jobs:
   autobump:
@@ -29,24 +39,25 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
 
       - name: Configure git author
         run: |
           git config user.name  "autobump-bot"
           git config user.email "autobump-bot@users.noreply.github.com"
 
-      - name: Bump each cask
+      - name: Bump each cask to latest (verified, direct-commit)
         run: |
           set -uo pipefail
           shopt -s nullglob
+
+          default_branch="$(git rev-parse --abbrev-ref HEAD)"
+          bumped=0
+
           for cask_file in Casks/*.rb; do
             cask="$(basename "$cask_file" .rb)"
             echo "::group::${cask}"
 
-            # Extract the upstream owner/repo from the `url` line. We assume a
-            # GitHub release URL like:
+            # Upstream owner/repo from the `url` line, which is expected to be:
             #   url "https://github.com/OWNER/REPO/releases/download/v#{version}/asset.zip"
             upstream="$(grep -E '^\s*url\s+"https://github\.com/' "$cask_file" \
                        | head -1 \
@@ -66,18 +77,12 @@ jobs:
               echo "::endgroup::"; continue
             fi
             if [[ "$latest" == "$current" ]]; then
-              echo "${cask} at latest (${current})"
+              echo "${cask} already at latest (${current})"
               echo "::endgroup::"; continue
             fi
             echo "${cask}: ${current} → ${latest}"
 
-            branch="autobump/${cask}-${latest}"
-            if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-              echo "branch ${branch} already exists on origin — skipping"
-              echo "::endgroup::"; continue
-            fi
-
-            # Reconstruct the new download URL by substituting the version.
+            # Reconstruct the download URL by substituting the version.
             url_template="$(grep -E '^\s*url\s+"' "$cask_file" | head -1 \
                             | sed -E 's|.*url[[:space:]]+"([^"]+)".*|\1|')"
             new_url="${url_template//\#\{version\}/$latest}"
@@ -90,6 +95,17 @@ jobs:
             fi
             new_sha="$(shasum -a 256 "$asset" | awk '{print $1}')"
 
+            # Defense-in-depth: cross-check the computed sha against the
+            # publisher's own `<asset>.sha256` sidecar. Catches a corrupted /
+            # truncated download before we pin a bad hash. (It does NOT defend
+            # against a release fully swapped by someone with repo-write — that
+            # needs notarization; tracked separately.)
+            published_sha="$(curl -fsSL "${new_url}.sha256" 2>/dev/null | awk '{print $1}' || true)"
+            if [[ -n "$published_sha" && "$published_sha" != "$new_sha" ]]; then
+              echo "::error::sha mismatch for ${cask} v${latest}: computed ${new_sha} != published ${published_sha} — skipping"
+              echo "::endgroup::"; continue
+            fi
+
             # In-place version + sha256 rewrite (BSD sed needs '' after -i).
             sed -E -i '' "s|^([[:space:]]*version[[:space:]]+)\"[^\"]+\"|\1\"${latest}\"|" "$cask_file"
             sed -E -i '' "s|^([[:space:]]*sha256[[:space:]]+)\"[a-f0-9]{64}\"|\1\"${new_sha}\"|" "$cask_file"
@@ -99,18 +115,18 @@ jobs:
               echo "::endgroup::"; continue
             fi
 
-            git checkout -B "$branch"
             git add "$cask_file"
             git commit -m "${cask} ${current} → ${latest}"
-            git push -u origin "$branch"
-
-            body="$(printf 'Auto-bumps **%s** to upstream release v%s.\n\nNew sha256: `%s`.\n\nOpened by .github/workflows/autobump.yml on a GitHub-API release check.\n' "$cask" "$latest" "$new_sha")"
-            gh pr create --base main --head "$branch" \
-              --title "${cask} ${current} → ${latest}" \
-              --body "$body"
-
-            git checkout main
+            bumped=1
             echo "::endgroup::"
           done
-          # Always succeed: per-cask up-to-date is the normal state.
+
+          if [[ "$bumped" == "1" ]]; then
+            # Rebase-safe push in case another run landed between checkout and now.
+            git pull --rebase origin "$default_branch" || true
+            git push origin "HEAD:${default_branch}"
+          else
+            echo "all casks already at latest — nothing to commit"
+          fi
+          # Always succeed: up-to-date is the normal state.
           exit 0
