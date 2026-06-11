@@ -3,11 +3,10 @@
 # `sha256` — never the `url` line — so the URL template below must stay correct.
 cask "network-monitor" do
   version "2.0.0"
-  sha256 "8088f5ef6a283fbd8c074490b29853a098990e0fa6d7d92d0e7eb8af100b78e2"
+  sha256 "fc259ed18b56581d6505dd04d652ff66ba503144a97d716c8b5f9f5ff66a8049"
 
-  url "https://github.com/Light-House-Group/Network-Speed/releases/download/v#{version}/NetworkUsageMonitor-#{version}.dmg",
-      verified: "github.com/Light-House-Group/Network-Speed/"
-  name "Network Speed Pro"
+  url "https://github.com/Light-House-Group/Network-Speed/releases/download/v#{version}/NetworkUsageMonitor-#{version}.dmg"
+  name "Network Monitor"
   desc "Menu-bar network monitor with a per-app firewall"
   homepage "https://github.com/Light-House-Group/Network-Speed"
 
@@ -16,7 +15,7 @@ cask "network-monitor" do
     strategy :github_latest
   end
 
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura
 
   app "NetworkUsageMonitor.app"
 
@@ -30,11 +29,13 @@ cask "network-monitor" do
 
   uninstall quit: "io.github.light-house-group.network-speed"
 
+  # Legacy v1 paths (the com.networkmonitor.macos namespace) are tagged inline so
+  # the list stays strictly alphabetized for `brew style` without mislabeling the
+  # current v2 preference as legacy.
   zap trash: [
     "~/Library/Application Support/NetworkUsageMonitor",
+    "~/Library/LaunchAgents/com.networkmonitor.macos.plist",   # legacy v1
+    "~/Library/Preferences/com.networkmonitor.macos.plist",    # legacy v1
     "~/Library/Preferences/io.github.light-house-group.network-speed.plist",
-    # Legacy v1 paths — cleaned up on uninstall for users upgrading from pre-2.0.
-    "~/Library/Preferences/com.networkmonitor.macos.plist",
-    "~/Library/LaunchAgents/com.networkmonitor.macos.plist",
   ]
 end
